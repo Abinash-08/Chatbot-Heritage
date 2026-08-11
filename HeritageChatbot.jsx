@@ -24,6 +24,14 @@ const TIER_COLOR = { 1: C.gold, 2: C.tealSoft, 3: C.ivoryMuted };
 const STORAGE_KEY = "kalinga_guide_sessions_v1";
 const MAX_SESSIONS = 20;
 
+/* ---------- Gemini API config ---------- */
+/* NOTE: this key is visible to anyone who views your site's source (browser JS can't hide it).
+   Restrict it in Google AI Studio / Google Cloud Console to your GitHub Pages HTTP referrer
+   (e.g. https://<your-username>.github.io/*) so it can't be reused elsewhere. */
+const GEMINI_API_KEY = "AQ.Ab8RN6L-Ny5gKpMpynb16XqDgXvc1wI5u5pQBfhODECU7TrYhQ";
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
 /* ---------- Language config ---------- */
 const LANGS = {
   en: { label: "English", short: "EN", speechLang: "en-IN", ttsLang: "en" },
@@ -131,6 +139,23 @@ function findMentionedDistricts(text) {
 
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+/* ---------- convert Anthropic-style content blocks to Gemini "parts" ---------- */
+function toGeminiParts(blocks) {
+  if (typeof blocks === "string") return [{ text: blocks }];
+  return blocks.map(b =>
+    b.type === "image"
+      ? { inline_data: { mime_type: b.source.media_type, data: b.source.data } }
+      : { text: b.text }
+  );
+}
+
+function toGeminiContents(apiMessages) {
+  return apiMessages.map(m => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: toGeminiParts(m.content),
+  }));
 }
 
 /* ---------- live photo lookup (Wikipedia REST search, no key needed, CORS-open) ---------- */
@@ -447,13 +472,21 @@ export default function HeritageChatbot() {
     const apiMessages = [...historyRef.current.slice(0, -1), taggedLast];
 
     try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, system: SYSTEM_PROMPT, messages: apiMessages }),
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          contents: toGeminiContents(apiMessages),
+        }),
       });
       const data = await response.json();
-      const replyText = (data.content || []).map(b => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n").trim()
+      if (data.error) throw new Error(data.error.message || "Gemini API error");
+
+      const replyText = (data.candidates?.[0]?.content?.parts || [])
+        .map(p => p.text || "")
+        .join("\n")
+        .trim()
         || "I couldn't form a reply just then — could you ask again?";
 
       const mentioned = findMentionedDistricts(replyText);
